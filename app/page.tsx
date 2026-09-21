@@ -73,14 +73,16 @@ const phaseCopy: Record<Phase, { label: string; detail: string; progress: number
   error: { label: "处理失败", detail: "请检查链接后重试", progress: 0 },
 };
 
-function toMarkdown(video: VideoInfo, summary: VideoSummary) {
+function toMarkdown(video: VideoInfo, summary: VideoSummary, transcript: TranscriptSegment[]) {
   return [
     `# ${video.title}`,
     "",
     `> ${summary.overview}`,
     "",
     "## 核心观点",
-    ...summary.keyPoints.map((point) => `- ${point}`),
+    ...summary.keyPoints.flatMap((point) => [`### ${point.title}`, point.detail, `时间：${formatTimestamp(point.time)}`, ""]),
+    "## 详细内容",
+    ...summary.chapters.flatMap((chapter) => [`### ${formatTimestamp(chapter.time)} · ${chapter.title}`, chapter.summary, ""]),
     "",
     "## 时间线",
     ...summary.chapters.map((chapter) => `- **${formatTimestamp(chapter.time)} · ${chapter.title}** — ${chapter.summary}`),
@@ -88,6 +90,9 @@ function toMarkdown(video: VideoInfo, summary: VideoSummary) {
     `关键词：${summary.keywords.join("、")}`,
     "",
     summary.disclaimer,
+    "",
+    "## 原始转写全文",
+    ...transcript.map((segment) => `[${formatTimestamp(segment.start)}] ${segment.text}`),
     "",
     `[查看原视频](${video.url})`,
   ].join("\n");
@@ -142,7 +147,7 @@ export default function Home() {
       }
       const fallbackBvid = info.bvid || extractBvid(trimmed);
       if (!info.ok && !fallbackBvid) throw new Error(info.error || "无法从链接中识别 BV 号");
-      const activeVideo: VideoInfo = info.video ?? {
+      let activeVideo: VideoInfo = info.video ?? {
         bvid: fallbackBvid,
         title: fallbackBvid ? `B站视频 ${fallbackBvid}` : "B站视频",
         description: "",
@@ -181,9 +186,12 @@ export default function Home() {
             if (status.status === "complete") {
               activeTranscript = status.transcript ?? [];
               setTranscript(activeTranscript);
+              if (status.video) {
+                activeVideo = status.video as VideoInfo;
+                setVideo(activeVideo);
+              }
               if (status.summary) {
                 setSummary(status.summary);
-                setVideo((current) => status.video ?? current);
                 setProgress(100);
                 setPhase("done");
                 return status.summary as VideoSummary;
@@ -271,7 +279,11 @@ export default function Home() {
     return () => lifecycle.abort();
   }, [analyze]);
 
-  const markdown = useMemo(() => video && summary ? toMarkdown(video, summary) : "", [video, summary]);
+  const transcriptText = useMemo(
+    () => transcript.map((segment) => `[${formatTimestamp(segment.start)}] ${segment.text}`).join("\n"),
+    [transcript],
+  );
+  const markdown = useMemo(() => video && summary ? toMarkdown(video, summary, transcript) : "", [video, summary, transcript]);
 
   function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -282,6 +294,12 @@ export default function Home() {
     if (!markdown) return;
     await navigator.clipboard.writeText(markdown);
     toast.success("总结已复制");
+  }
+
+  async function copyTranscript() {
+    if (!transcriptText) return;
+    await navigator.clipboard.writeText(transcriptText);
+    toast.success("完整转写已复制");
   }
 
   async function copyDirectLink() {
@@ -429,17 +447,21 @@ export default function Home() {
 
             <div className="grid gap-7 lg:grid-cols-[minmax(0,1fr)_300px]">
               <article className="rounded-[1.5rem] border border-border bg-card/78 p-5 shadow-[0_24px_80px_rgba(0,0,0,.2)] backdrop-blur-xl sm:p-8">
-                <div className="border-b border-border pb-7"><p className="text-xs font-medium uppercase tracking-[.13em] text-primary">一句话结论</p><h2 className="mt-3 text-pretty text-2xl font-semibold leading-[1.35] tracking-tight sm:text-3xl">{summary.headline}</h2><p className="mt-4 text-[15px] leading-7 text-muted-foreground">{summary.overview}</p></div>
-                <Tabs defaultValue="points" className="mt-6">
-                  <TabsList><TabsTrigger value="points"><Sparkles />要点</TabsTrigger><TabsTrigger value="timeline"><Clock3 />时间线</TabsTrigger><TabsTrigger value="transcript"><FileText />转写</TabsTrigger></TabsList>
+                <div className="border-b border-border pb-7"><p className="text-xs font-medium uppercase tracking-[.13em] text-primary">一句话结论</p><h2 className="mt-3 text-pretty text-2xl font-semibold leading-[1.35] tracking-tight sm:text-3xl">{summary.headline}</h2><p className="mt-4 whitespace-pre-line text-[15px] leading-7 text-muted-foreground">{summary.overview}</p></div>
+                <Tabs defaultValue="detail" className="mt-6">
+                  <TabsList className="w-full"><TabsTrigger value="detail"><FileText />详解</TabsTrigger><TabsTrigger value="points"><Sparkles />要点</TabsTrigger><TabsTrigger value="timeline"><Clock3 />时间线</TabsTrigger><TabsTrigger value="transcript"><AudioLines />原文</TabsTrigger></TabsList>
+                  <TabsContent value="detail" className="mt-6 space-y-7">
+                    {summary.chapters.map((chapter, index) => <section key={`${chapter.time}-${index}`} className="border-b border-border/70 pb-6 last:border-0 last:pb-0"><a href={`${video.url}&t=${Math.round(chapter.time)}`} target="_blank" rel="noreferrer" className="font-mono text-xs text-primary hover:underline">{formatTimestamp(chapter.time)}</a><h3 className="mt-2 text-lg font-semibold leading-7">{chapter.title}</h3><p className="mt-3 text-[15px] leading-8 text-foreground/85">{chapter.summary}</p></section>)}
+                  </TabsContent>
                   <TabsContent value="points" className="mt-5 space-y-3">
-                    {summary.keyPoints.map((point, index) => <div key={`${point}-${index}`} className="flex gap-3 rounded-xl border border-border/80 bg-background/30 p-4"><span className="grid size-7 shrink-0 place-items-center rounded-lg bg-primary/12 text-xs font-semibold text-primary">{index + 1}</span><p className="text-[15px] leading-7 text-foreground/90">{point}</p></div>)}
+                    {summary.keyPoints.map((point, index) => <div key={`${point.title}-${index}`} className="flex gap-3 rounded-xl border border-border/80 bg-background/30 p-4"><span className="grid size-7 shrink-0 place-items-center rounded-lg bg-primary/12 text-xs font-semibold text-primary">{index + 1}</span><div><div className="flex flex-wrap items-center gap-2"><h3 className="text-[15px] font-semibold leading-7 text-foreground">{point.title}</h3><a href={`${video.url}&t=${Math.round(point.time)}`} target="_blank" rel="noreferrer" className="font-mono text-xs text-primary hover:underline">{formatTimestamp(point.time)}</a></div><p className="mt-1 text-sm leading-7 text-muted-foreground">{point.detail}</p></div></div>)}
                   </TabsContent>
                   <TabsContent value="timeline" className="mt-5 space-y-1">
                     {summary.chapters.map((chapter, index) => <a key={`${chapter.time}-${index}`} href={`${video.url}&t=${Math.round(chapter.time)}`} target="_blank" rel="noreferrer" className="group grid grid-cols-[58px_1fr] gap-3 rounded-xl p-3 transition-colors hover:bg-primary/[.07]"><span className="font-mono text-xs text-primary">{formatTimestamp(chapter.time)}</span><span><span className="block text-sm font-medium group-hover:text-primary">{chapter.title}</span><span className="mt-1 block text-sm leading-6 text-muted-foreground">{chapter.summary}</span></span></a>)}
                   </TabsContent>
-                  <TabsContent value="transcript" className="mt-5 max-h-[520px] space-y-1 overflow-y-auto pr-2 scrollbar-thin">
-                    {transcript.map((segment, index) => <a key={`${segment.start}-${index}`} href={`${video.url}&t=${Math.round(segment.start)}`} target="_blank" rel="noreferrer" className="grid grid-cols-[58px_1fr] gap-3 rounded-lg px-3 py-2 text-sm hover:bg-primary/[.06]"><span className="font-mono text-xs text-primary">{formatTimestamp(segment.start)}</span><span className="leading-6 text-muted-foreground">{segment.text}</span></a>)}
+                  <TabsContent value="transcript" className="mt-5">
+                    <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-background/35 p-4"><div><p className="text-sm font-medium">完整转写原文</p><p className="mt-1 text-xs text-muted-foreground">共 {transcript.length} 段，约 {transcript.reduce((sum, item) => sum + item.text.length, 0).toLocaleString()} 字</p></div><Button variant="outline" size="sm" onClick={copyTranscript}><Copy className="size-3.5" />复制原文</Button></div>
+                    <div className="max-h-[560px] space-y-1 overflow-y-auto pr-2 scrollbar-thin">{transcript.map((segment, index) => <a key={`${segment.start}-${index}`} href={`${video.url}&t=${Math.round(segment.start)}`} target="_blank" rel="noreferrer" className="grid grid-cols-[58px_1fr] gap-3 rounded-lg px-3 py-2 text-sm hover:bg-primary/[.06]"><span className="font-mono text-xs text-primary">{formatTimestamp(segment.start)}</span><span className="leading-7 text-foreground/80">{segment.text}</span></a>)}</div>
                   </TabsContent>
                 </Tabs>
               </article>

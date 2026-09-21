@@ -102,6 +102,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "[4/4] Starting the local transcription engine..." -ForegroundColor Cyan
+$env:HF_HUB_DISABLE_XET = "1"
+$env:HF_HUB_DISABLE_SYMLINKS_WARNING = "1"
 Start-Process -FilePath $pythonExe `
   -ArgumentList @("-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", "8765") `
   -WorkingDirectory $engineRoot `

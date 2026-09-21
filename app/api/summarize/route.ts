@@ -9,15 +9,35 @@ const schema = {
   properties: {
     headline: { type: "string" },
     overview: { type: "string" },
-    keyPoints: { type: "array", items: { type: "string" }, minItems: 3, maxItems: 8 },
+    keyPoints: {
+      type: "array",
+      minItems: 4,
+      maxItems: 8,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["title", "detail", "time"],
+        properties: {
+          title: { type: "string", minLength: 4 },
+          detail: { type: "string", minLength: 80 },
+          time: { type: "number" },
+        },
+      },
+    },
     chapters: {
       type: "array",
       items: {
         type: "object",
         additionalProperties: false,
         required: ["time", "title", "summary"],
-        properties: { time: { type: "number" }, title: { type: "string" }, summary: { type: "string" } },
+        properties: {
+          time: { type: "number" },
+          title: { type: "string" },
+          summary: { type: "string", minLength: 100 },
+        },
       },
+      minItems: 3,
+      maxItems: 10,
     },
     quotes: {
       type: "array",
@@ -79,7 +99,7 @@ export async function POST(request: NextRequest) {
       body: JSON.stringify({
         model,
         store: false,
-        instructions: "你是一名严谨的中文内容编辑。只根据给定转写总结，不补充外部事实；保留不确定性，并用时间秒数关联原视频。",
+        instructions: "你是一名严谨的中文内容编辑。只根据给定转写总结，不补充外部事实；保留不确定性，并用时间秒数关联原视频。overview 要写成 2 至 4 个连贯段落。每个 keyPoint 必须包含简明标题，以及 2 至 4 句具体说明，优先保留人物、数字、判断依据和例子。chapters 要覆盖完整视频，每段写成不少于 100 字的内容段落，不能只列标题。",
         input: `视频标题：${title}\n视频简介：${description}\n\n转写：\n${transcriptText}`,
         text: { format: { type: "json_schema", name: "video_summary", strict: true, schema } },
       }),

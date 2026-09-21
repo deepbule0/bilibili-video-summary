@@ -9,7 +9,7 @@
 3. 首次启动会自动安装依赖与 Whisper 模型；准备完成后会自动打开在线页面。
 4. 粘贴 B 站链接并点击「一键总结」。
 
-默认使用 `faster-whisper base` 在本机 CPU 转写，使用规则模型在本地提炼摘要，不产生模型 API 费用。首次转写会下载 Whisper 模型，之后可离线复用。已正确安装 CUDA 运行库的电脑可设置 `WHISPER_DEVICE=cuda` 使用显卡。
+默认使用准确率更高的 `faster-whisper large-v3` 在本机 CPU 转写，使用规则模型在本地提炼摘要，不产生模型 API 费用。首次使用需要下载约 3GB 模型，之后可离线复用。已正确安装 CUDA 运行库的电脑可设置 `WHISPER_DEVICE=cuda` 使用显卡。
 
 ## GPT 增强模式
 

@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
 import shutil
 import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 from urllib.parse import urlparse
 
+import requests
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -39,11 +42,21 @@ jobs_lock = threading.Lock()
 models: dict[str, object] = {}
 model_lock = threading.Lock()
 
+LARGE_V3_REPOSITORY = "https://modelscope.cn/models/pengzhendong/faster-whisper-large-v3/resolve/master"
+LARGE_V3_MODEL_SIZE = 3_087_284_237
+LARGE_V3_MODEL_SHA256 = "69f74147e3334731bc3a76048724833325d2ec74642fb52620eda87352e3d4f1"
+LARGE_V3_FILES = (
+    "config.json",
+    "preprocessor_config.json",
+    "tokenizer.json",
+    "vocabulary.json",
+)
+
 
 class JobRequest(BaseModel):
     url: str = Field(min_length=3, max_length=1200)
     summary_mode: Literal["local", "gpt"] = "local"
-    model: Literal["base", "small", "medium"] | None = None
+    model: Literal["base", "small", "medium", "large-v3"] | None = None
 
 
 def set_job(job_id: str, **values) -> None:
@@ -66,7 +79,101 @@ def validate_url(raw_url: str) -> str:
     return value
 
 
-def get_model(model_name: str):
+def large_v3_directory() -> Path:
+    cache_root = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / ".cache"))
+    return cache_root / "BiliVideoSummary" / "models" / "faster-whisper-large-v3"
+
+
+def download_small_model_file(model_dir: Path, filename: str) -> None:
+    target = model_dir / filename
+    if target.exists() and target.stat().st_size > 0:
+        return
+    temporary = target.with_suffix(target.suffix + ".download")
+    with requests.get(f"{LARGE_V3_REPOSITORY}/{filename}", stream=True, timeout=(20, 120)) as response:
+        response.raise_for_status()
+        with temporary.open("wb") as output:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    output.write(chunk)
+    temporary.replace(target)
+
+
+def download_large_v3_weights(model_dir: Path, on_progress: Callable[[float], None] | None = None) -> None:
+    target = model_dir / "model.bin"
+    if target.exists() and target.stat().st_size == LARGE_V3_MODEL_SIZE:
+        return
+
+    workers = 8
+    chunk_size = (LARGE_V3_MODEL_SIZE + workers - 1) // workers
+    progress_lock = threading.Lock()
+    completed_bytes = 0
+
+    def download_part(index: int) -> Path:
+        nonlocal completed_bytes
+        start = index * chunk_size
+        end = min(LARGE_V3_MODEL_SIZE - 1, start + chunk_size - 1)
+        expected = end - start + 1
+        part = model_dir / f"model.bin.part{index:02d}"
+        existing = part.stat().st_size if part.exists() else 0
+        if existing > expected:
+            part.unlink()
+            existing = 0
+        with progress_lock:
+            completed_bytes += existing
+        if existing == expected:
+            return part
+
+        headers = {"Range": f"bytes={start + existing}-{end}"}
+        with requests.get(
+            f"{LARGE_V3_REPOSITORY}/model.bin",
+            headers=headers,
+            stream=True,
+            timeout=(30, 180),
+        ) as response:
+            if response.status_code != 206:
+                raise RuntimeError(f"模型分片下载失败（HTTP {response.status_code}）")
+            with part.open("ab") as output:
+                for data in response.iter_content(chunk_size=1024 * 1024):
+                    if not data:
+                        continue
+                    output.write(data)
+                    with progress_lock:
+                        completed_bytes += len(data)
+                        if on_progress:
+                            on_progress(min(1.0, completed_bytes / LARGE_V3_MODEL_SIZE))
+        if part.stat().st_size != expected:
+            raise RuntimeError("模型分片下载不完整，请重新启动后继续")
+        return part
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        parts = list(pool.map(download_part, range(workers)))
+
+    assembled = model_dir / "model.bin.assembling"
+    digest = hashlib.sha256()
+    with assembled.open("wb") as output:
+        for part in parts:
+            with part.open("rb") as source:
+                while block := source.read(4 * 1024 * 1024):
+                    output.write(block)
+                    digest.update(block)
+    if digest.hexdigest() != LARGE_V3_MODEL_SHA256:
+        assembled.unlink(missing_ok=True)
+        raise RuntimeError("模型校验失败，请重新启动后重试")
+    assembled.replace(target)
+    for part in parts:
+        part.unlink(missing_ok=True)
+
+
+def ensure_large_v3_model(on_progress: Callable[[float], None] | None = None) -> Path:
+    model_dir = large_v3_directory()
+    model_dir.mkdir(parents=True, exist_ok=True)
+    for filename in LARGE_V3_FILES:
+        download_small_model_file(model_dir, filename)
+    download_large_v3_weights(model_dir, on_progress)
+    return model_dir
+
+
+def get_model(model_name: str, job_id: str | None = None):
     from faster_whisper import WhisperModel
 
     with model_lock:
@@ -78,12 +185,17 @@ def get_model(model_name: str):
             if device not in {"cpu", "cuda"}:
                 device = "cpu"
             compute_type = "float16" if device == "cuda" else "int8"
+            model_source: str | Path = model_name
+            if model_name == "large-v3":
+                model_source = ensure_large_v3_model(
+                    lambda value: set_job(job_id, progress=28 + int(value * 7)) if job_id else None,
+                )
             try:
-                models[model_name] = WhisperModel(model_name, device=device, compute_type=compute_type)
+                models[model_name] = WhisperModel(str(model_source), device=device, compute_type=compute_type)
             except Exception:
                 if device != "cuda":
                     raise
-                models[model_name] = WhisperModel(model_name, device="cpu", compute_type="int8")
+                models[model_name] = WhisperModel(str(model_source), device="cpu", compute_type="int8")
         return models[model_name]
 
 
@@ -128,8 +240,8 @@ def run_job(job_id: str, request: JobRequest) -> None:
         duration = float(info.get("duration") or 0)
         set_job(job_id, stage="model", progress=28)
 
-        model_name = request.model or os.environ.get("WHISPER_MODEL", "base")
-        model = get_model(model_name)
+        model_name = request.model or os.environ.get("WHISPER_MODEL", "large-v3")
+        model = get_model(model_name, job_id)
         set_job(job_id, stage="transcribe", progress=36)
         segment_stream, detected = model.transcribe(
             str(audio_path),
@@ -156,12 +268,29 @@ def run_job(job_id: str, request: JobRequest) -> None:
 
         if not transcript:
             raise RuntimeError("没有识别到清晰语音，请确认视频包含可听见的人声")
+        webpage_url = str(info.get("webpage_url") or url)
+        raw_video_id = str(info.get("id") or "")
+        bvid_match = re.search(r"BV[1-9A-HJ-NP-Za-km-z]{10}", f"{webpage_url} {raw_video_id}")
+        video_id = bvid_match.group(0) if bvid_match else raw_video_id
+        video = {
+            "bvid": video_id,
+            "title": str(info.get("title") or video_id or "B站视频"),
+            "description": str(info.get("description") or ""),
+            "cover": str(info.get("thumbnail") or ""),
+            "owner": str(info.get("uploader") or info.get("channel") or ""),
+            "duration": round(duration),
+            "part": str(info.get("title") or ""),
+            "partNumber": int(info.get("playlist_index") or 1),
+            "parts": int(info.get("n_entries") or 1),
+            "url": webpage_url,
+        }
         set_job(
             job_id,
             status="complete",
             stage="complete",
             progress=88,
             transcript=transcript,
+            video=video,
             language=getattr(detected, "language", "zh"),
             language_probability=round(float(getattr(detected, "language_probability", 0)), 4),
             model=model_name,
@@ -185,7 +314,7 @@ def root():
 def health():
     return {
         "status": "ready",
-        "model": os.environ.get("WHISPER_MODEL", "base"),
+        "model": os.environ.get("WHISPER_MODEL", "large-v3"),
         "device": os.environ.get("WHISPER_DEVICE", "cpu"),
     }
 
