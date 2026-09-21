@@ -9,6 +9,35 @@ function bilibiliHeaders() {
   };
 }
 
+async function fetchVideoData(bvid: string) {
+  const apiResponse = await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`, {
+    headers: { ...bilibiliHeaders(), Accept: "application/json,text/plain,*/*" },
+  });
+  const apiText = await apiResponse.text();
+  try {
+    const apiJson = JSON.parse(apiText) as { code: number; message: string; data: any };
+    if (apiJson.code === 0 && apiJson.data) return apiJson.data;
+  } catch {
+    // The Bilibili API sometimes serves a browser challenge to cloud IPs.
+  }
+
+  const pageResponse = await fetch(`https://www.bilibili.com/video/${bvid}/`, {
+    headers: {
+      ...bilibiliHeaders(),
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+    },
+  });
+  const pageHtml = await pageResponse.text();
+  const initialState = pageHtml.match(/__INITIAL_STATE__=(\{.*?\});\(function\(\)/s)?.[1];
+  if (!initialState) {
+    throw new Error(`B站暂时拒绝了云端读取（API ${apiResponse.status}，页面 ${pageResponse.status}）`);
+  }
+  const pageData = JSON.parse(initialState) as { videoData?: any; error?: { trueCode?: number } };
+  if (!pageData.videoData) throw new Error("B站页面中没有可用的视频信息");
+  return pageData.videoData;
+}
+
 async function resolveBvid(raw: string) {
   const direct = raw.match(BVID_PATTERN)?.[0];
   if (direct) return direct;
@@ -33,20 +62,14 @@ export async function GET(request: NextRequest) {
     const raw = request.nextUrl.searchParams.get("url")?.trim() ?? "";
     const bvid = await resolveBvid(raw);
     resolvedBvid = bvid;
-    const infoResponse = await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`, {
-      headers: bilibiliHeaders(),
-    });
-    const infoJson = await infoResponse.json() as { code: number; message: string; data: any };
-    if (infoJson.code !== 0 || !infoJson.data) {
-      throw new Error(`B站接口返回 ${infoJson.code}：${infoJson.message || "视频信息读取失败"}`);
-    }
+    const videoData = await fetchVideoData(bvid);
 
     const pageParam = Number(request.nextUrl.searchParams.get("p") ?? "1");
-    const pages = Array.isArray(infoJson.data.pages) ? infoJson.data.pages : [];
+    const pages = Array.isArray(videoData.pages) ? videoData.pages : [];
     const page = pages[Math.min(Math.max(pageParam - 1, 0), Math.max(0, pages.length - 1))] ?? {
-      cid: infoJson.data.cid,
-      duration: infoJson.data.duration,
-      part: infoJson.data.title,
+      cid: videoData.cid,
+      duration: videoData.duration,
+      part: videoData.title,
     };
 
     let transcript: Array<{ start: number; end: number; text: string }> = [];
@@ -78,12 +101,12 @@ export async function GET(request: NextRequest) {
       ok: true,
       video: {
         bvid,
-        title: infoJson.data.title,
-        description: infoJson.data.desc ?? "",
-        cover: String(infoJson.data.pic ?? "").replace(/^http:/, "https:"),
-        owner: infoJson.data.owner?.name ?? "",
-        duration: Number(page.duration || infoJson.data.duration || 0),
-        part: page.part ?? infoJson.data.title,
+        title: videoData.title,
+        description: videoData.desc ?? "",
+        cover: String(videoData.pic ?? "").replace(/^http:/, "https:"),
+        owner: videoData.owner?.name ?? "",
+        duration: Number(page.duration || videoData.duration || 0),
+        part: page.part ?? videoData.title,
         partNumber: Number(page.page ?? 1),
         parts: pages.length || 1,
         url: `https://www.bilibili.com/video/${bvid}/?p=${page.page ?? 1}`,
