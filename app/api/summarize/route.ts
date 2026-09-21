@@ -57,15 +57,16 @@ export async function POST(request: NextRequest) {
     if (!transcript.length) throw new Error("没有可用于总结的转写文本");
 
     if (body.mode !== "gpt") {
-      return NextResponse.json({ summary: summarizeLocally(title, transcript, description) });
+      return NextResponse.json({ ok: true, summary: summarizeLocally(title, transcript, description) });
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       return NextResponse.json({
+        ok: false,
         error: "当前站点尚未配置 OpenAI API Key，请使用零费用模式或在部署环境中添加 OPENAI_API_KEY。",
         code: "OPENAI_NOT_CONFIGURED",
-      }, { status: 409 });
+      });
     }
     const model = process.env.OPENAI_SUMMARY_MODEL || "gpt-5-mini";
     const transcriptText = transcript
@@ -91,9 +92,10 @@ export async function POST(request: NextRequest) {
     const text = getOutputText(data);
     if (!text) throw new Error("GPT 未返回可解析的总结");
     const summary = JSON.parse(text) as Omit<VideoSummary, "mode">;
-    return NextResponse.json({ summary: { ...summary, mode: "gpt" } });
+    return NextResponse.json({ ok: true, summary: { ...summary, mode: "gpt" } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "总结生成失败";
-    return NextResponse.json({ error: message }, { status: 400 });
+    console.warn("[summarize]", message);
+    return NextResponse.json({ ok: false, error: message });
   }
 }

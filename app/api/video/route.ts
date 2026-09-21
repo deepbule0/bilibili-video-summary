@@ -28,14 +28,18 @@ async function resolveBvid(raw: string) {
 }
 
 export async function GET(request: NextRequest) {
+  let resolvedBvid = "";
   try {
     const raw = request.nextUrl.searchParams.get("url")?.trim() ?? "";
     const bvid = await resolveBvid(raw);
+    resolvedBvid = bvid;
     const infoResponse = await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`, {
       headers: bilibiliHeaders(),
     });
     const infoJson = await infoResponse.json() as { code: number; message: string; data: any };
-    if (infoJson.code !== 0 || !infoJson.data) throw new Error(infoJson.message || "视频信息读取失败");
+    if (infoJson.code !== 0 || !infoJson.data) {
+      throw new Error(`B站接口返回 ${infoJson.code}：${infoJson.message || "视频信息读取失败"}`);
+    }
 
     const pageParam = Number(request.nextUrl.searchParams.get("p") ?? "1");
     const pages = Array.isArray(infoJson.data.pages) ? infoJson.data.pages : [];
@@ -71,6 +75,7 @@ export async function GET(request: NextRequest) {
     }
 
     return NextResponse.json({
+      ok: true,
       video: {
         bvid,
         title: infoJson.data.title,
@@ -88,6 +93,10 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "视频读取失败，请稍后重试";
-    return NextResponse.json({ error: message }, { status: 400 });
+    console.warn("[video-info]", message);
+    // Sites may replace non-2xx API bodies with an HTML error page. Keep the
+    // application-level failure in JSON so the client can fall back to the
+    // local engine instead of attempting to parse platform HTML.
+    return NextResponse.json({ ok: false, error: message, bvid: resolvedBvid });
   }
 }

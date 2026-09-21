@@ -50,6 +50,19 @@ type VideoInfo = {
 
 type Phase = "idle" | "reading" | "transcribing" | "summarizing" | "done" | "needs-engine" | "error";
 
+function extractBvid(value: string) {
+  return value.match(/BV[1-9A-HJ-NP-Za-km-z]{10}/)?.[0] ?? "";
+}
+
+async function readJsonResponse(response: Response) {
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`线上接口返回了非 JSON 内容（HTTP ${response.status}），已停止解析以避免显示无意义错误。`);
+  }
+}
+
 const phaseCopy: Record<Phase, { label: string; detail: string; progress: number }> = {
   idle: { label: "等待链接", detail: "粘贴后即可开始", progress: 0 },
   reading: { label: "读取视频", detail: "正在获取标题、分 P 与字幕信息", progress: 18 },
@@ -117,10 +130,31 @@ export default function Home() {
     setPhase("reading");
 
     try {
-      const infoResponse = await fetch(`/api/video?url=${encodeURIComponent(trimmed)}`);
-      const info = await infoResponse.json();
-      if (!infoResponse.ok) throw new Error(info.error || "视频读取失败");
-      setVideo(info.video);
+      const infoResponse = await fetch(`/api/video?url=${encodeURIComponent(trimmed)}`, {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      });
+      let info: any;
+      try {
+        info = await readJsonResponse(infoResponse);
+      } catch {
+        info = { ok: false, error: "线上视频接口暂时不可用", bvid: extractBvid(trimmed) };
+      }
+      const fallbackBvid = info.bvid || extractBvid(trimmed);
+      if (!info.ok && !fallbackBvid) throw new Error(info.error || "无法从链接中识别 BV 号");
+      const activeVideo: VideoInfo = info.video ?? {
+        bvid: fallbackBvid,
+        title: fallbackBvid ? `B站视频 ${fallbackBvid}` : "B站视频",
+        description: "",
+        cover: "",
+        owner: "",
+        duration: 0,
+        part: "",
+        partNumber: 1,
+        parts: 1,
+        url: `https://www.bilibili.com/video/${fallbackBvid}/`,
+      };
+      setVideo(activeVideo);
       setProgress(28);
 
       let activeTranscript = (info.transcript ?? []) as TranscriptSegment[];
@@ -173,14 +207,16 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          title: info.video.title,
-          description: info.video.description,
+          title: activeVideo.title,
+          description: activeVideo.description,
           transcript: activeTranscript,
           mode,
         }),
       });
-      const summaryData = await summaryResponse.json();
-      if (!summaryResponse.ok) throw new Error(summaryData.error || "总结生成失败");
+      const summaryData = await readJsonResponse(summaryResponse);
+      if (!summaryResponse.ok || !summaryData.ok || !summaryData.summary) {
+        throw new Error(summaryData.error || "总结生成失败");
+      }
       setSummary(summaryData.summary);
       setProgress(100);
       setPhase("done");
