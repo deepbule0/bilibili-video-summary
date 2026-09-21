@@ -7,7 +7,18 @@ $pythonExe = Join-Path $venvRoot "Scripts\python.exe"
 Write-Host "[1/4] 检查本地运行环境..." -ForegroundColor Cyan
 $pythonLauncher = $null
 $pythonPrefix = @()
+$bundledPython = Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+if (Test-Path -LiteralPath $bundledPython) {
+  try {
+    $version = & $bundledPython -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
+    $parts = $version.Trim().Split('.')
+    if ([int]$parts[0] -eq 3 -and [int]$parts[1] -ge 10) {
+      $pythonLauncher = $bundledPython
+    }
+  } catch {}
+}
 foreach ($name in @("python3", "python")) {
+  if ($pythonLauncher) { break }
   $candidate = Get-Command $name -ErrorAction SilentlyContinue
   if ($candidate) {
     try {
