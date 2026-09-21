@@ -35,7 +35,7 @@ Write-Host "[1/4] Checking the local transcription engine..." -ForegroundColor C
 if (Test-LocalEngine) {
   Write-Host "The engine is already running." -ForegroundColor Green
   Start-Process $siteUrl
-  Read-Host "Keep this window open while using the site. Press Enter to close this message"
+  Read-Host "The engine is running in the background. Press Enter to close this message"
   exit 0
 }
 
@@ -127,4 +127,4 @@ Write-Host "Ready: http://127.0.0.1:8765" -ForegroundColor Green
 Write-Host "Opening the Bilibili summary site..." -ForegroundColor Green
 Start-Process $siteUrl
 Write-Host ""
-Read-Host "Keep this window open while using the site. Press Enter to close this message"
+Read-Host "The engine is running in the background. Press Enter to close this message"
