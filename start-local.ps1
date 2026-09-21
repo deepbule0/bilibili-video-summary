@@ -8,13 +8,46 @@ $engineOut = Join-Path $projectRoot ".local-engine.out.log"
 $engineErr = Join-Path $projectRoot ".local-engine.err.log"
 $healthUrl = "http://127.0.0.1:8765/api/health"
 $siteUrl = "https://bili-video-summary.purple-ox-8139.chatgpt.site/"
+$appDataRoot = Join-Path $env:LOCALAPPDATA "BiliVideoSummary"
+$cudaRuntimeRoot = Join-Path $appDataRoot "cuda-runtime-v3"
 
-function Test-LocalEngine {
+function Get-LocalEngineHealth {
   try {
     $response = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 2
-    return $response.StatusCode -eq 200
+    if ($response.StatusCode -eq 200) {
+      return $response.Content | ConvertFrom-Json
+    }
   } catch {
-    return $false
+    return $null
+  }
+  return $null
+}
+
+function Test-LocalEngine {
+  return $null -ne (Get-LocalEngineHealth)
+}
+
+function Get-CudaRuntimeDirectories {
+  if (-not (Test-Path -LiteralPath $cudaRuntimeRoot)) { return @() }
+  $cublas = Get-ChildItem -LiteralPath $cudaRuntimeRoot -Recurse -File -Filter "cublas64_12.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+  $cudnn = Get-ChildItem -LiteralPath $cudaRuntimeRoot -Recurse -File -Filter "cudnn64_9.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $cublas -or -not $cudnn) { return @() }
+  return @(Get-ChildItem -LiteralPath $cudaRuntimeRoot -Recurse -File -Filter "*.dll" | Select-Object -ExpandProperty DirectoryName -Unique)
+}
+
+function Stop-ExistingLocalEngine {
+  $listener = Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $listener) { return }
+  $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)" -ErrorAction SilentlyContinue
+  if ($process -and $process.Name -eq "python.exe" -and $process.CommandLine -match "uvicorn\s+server:app") {
+    Stop-Process -Id $listener.OwningProcess -Force
+    for ($attempt = 0; $attempt -lt 20; $attempt += 1) {
+      Start-Sleep -Milliseconds 250
+      if (-not (Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue)) { return }
+    }
+  }
+  if (Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue) {
+    throw "Port 8765 is occupied by another program."
   }
 }
 
@@ -31,9 +64,18 @@ function Stop-WithMessage([string]$message) {
   exit 1
 }
 
-Write-Host "[1/4] Checking the local transcription engine..." -ForegroundColor Cyan
-if (Test-LocalEngine) {
-  Write-Host "The engine is already running." -ForegroundColor Green
+Write-Host "[1/5] Checking the local transcription engine..." -ForegroundColor Cyan
+$existingHealth = Get-LocalEngineHealth
+$nvidiaSmi = Get-Command "nvidia-smi.exe" -ErrorAction SilentlyContinue
+$hasNvidiaGpu = $false
+if ($nvidiaSmi) {
+  & $nvidiaSmi.Path --query-gpu=name --format=csv,noheader 2>$null | Out-Null
+  $hasNvidiaGpu = $LASTEXITCODE -eq 0
+}
+
+$runtimeDirectories = @(Get-CudaRuntimeDirectories)
+if ($existingHealth -and (($existingHealth.device -eq "cuda" -and $runtimeDirectories.Count -gt 0) -or -not $hasNvidiaGpu)) {
+  Write-Host "The engine is already running on $($existingHealth.device)." -ForegroundColor Green
   Start-Process $siteUrl
   Read-Host "The engine is running in the background. Press Enter to close this message"
   exit 0
@@ -86,22 +128,48 @@ if (-not $pythonLauncher) {
 }
 
 if (-not (Test-Path -LiteralPath $pythonExe)) {
-  Write-Host "[2/4] Creating the speech recognition environment..." -ForegroundColor Cyan
+  Write-Host "[2/5] Creating the speech recognition environment..." -ForegroundColor Cyan
   & $pythonLauncher @pythonPrefix -m venv $venvRoot
   if ($LASTEXITCODE -ne 0) {
     Stop-WithMessage "Could not create the Python environment."
   }
 } else {
-  Write-Host "[2/4] Reusing the existing speech recognition environment." -ForegroundColor DarkGray
+  Write-Host "[2/5] Reusing the existing speech recognition environment." -ForegroundColor DarkGray
 }
 
-Write-Host "[3/4] Installing or checking dependencies. The first run can take several minutes..." -ForegroundColor Cyan
+Write-Host "[3/5] Installing or checking dependencies. The first run can take several minutes..." -ForegroundColor Cyan
 & $pythonExe -m pip install --disable-pip-version-check -q -r (Join-Path $engineRoot "requirements.txt")
 if ($LASTEXITCODE -ne 0) {
   Stop-WithMessage "Dependency installation failed. Check the network connection and try again."
 }
 
-Write-Host "[4/4] Starting the local transcription engine..." -ForegroundColor Cyan
+if ($hasNvidiaGpu) {
+  Write-Host "[4/5] Preparing GPU acceleration..." -ForegroundColor Cyan
+  try {
+    if ($runtimeDirectories.Count -eq 0) {
+      & $pythonExe (Join-Path $engineRoot "setup_cuda_runtime.py") --runtime-root $cudaRuntimeRoot
+      if ($LASTEXITCODE -ne 0) { throw "GPU runtime setup failed." }
+      $runtimeDirectories = @(Get-CudaRuntimeDirectories)
+    }
+    if ($runtimeDirectories.Count -eq 0) { throw "Required CUDA DLL files were not found." }
+    $env:PATH = ($runtimeDirectories + @($env:PATH)) -join ";"
+    $env:WHISPER_DEVICE = "cuda"
+    Write-Host "CUDA is ready. large-v3 will run on the NVIDIA GPU." -ForegroundColor Green
+  } catch {
+    $env:WHISPER_DEVICE = "cpu"
+    Write-Host "GPU setup was unavailable; CPU fallback will be used: $($_.Exception.Message)" -ForegroundColor Yellow
+  }
+} else {
+  Write-Host "[4/5] No compatible NVIDIA GPU detected; using CPU." -ForegroundColor DarkGray
+  $env:WHISPER_DEVICE = "cpu"
+}
+
+if ($existingHealth) {
+  Write-Host "Restarting the engine to enable $($env:WHISPER_DEVICE)..." -ForegroundColor Cyan
+  Stop-ExistingLocalEngine
+}
+
+Write-Host "[5/5] Starting the local transcription engine..." -ForegroundColor Cyan
 $env:HF_HUB_DISABLE_XET = "1"
 $env:HF_HUB_DISABLE_SYMLINKS_WARNING = "1"
 Start-Process -FilePath $pythonExe `

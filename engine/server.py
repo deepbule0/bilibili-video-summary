@@ -40,6 +40,8 @@ async def allow_local_network_access(request, call_next):
 jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
 models: dict[str, object] = {}
+model_devices: dict[str, str] = {}
+model_fallback_reasons: dict[str, str] = {}
 model_lock = threading.Lock()
 
 LARGE_V3_REPOSITORY = "https://modelscope.cn/models/pengzhendong/faster-whisper-large-v3/resolve/master"
@@ -173,7 +175,7 @@ def ensure_large_v3_model(on_progress: Callable[[float], None] | None = None) ->
     return model_dir
 
 
-def get_model(model_name: str, job_id: str | None = None):
+def get_model(model_name: str, job_id: str | None = None) -> tuple[object, str]:
     from faster_whisper import WhisperModel
 
     with model_lock:
@@ -192,11 +194,15 @@ def get_model(model_name: str, job_id: str | None = None):
                 )
             try:
                 models[model_name] = WhisperModel(str(model_source), device=device, compute_type=compute_type)
-            except Exception:
+                model_devices[model_name] = device
+                model_fallback_reasons.pop(model_name, None)
+            except Exception as exc:
                 if device != "cuda":
                     raise
                 models[model_name] = WhisperModel(str(model_source), device="cpu", compute_type="int8")
-        return models[model_name]
+                model_devices[model_name] = "cpu"
+                model_fallback_reasons[model_name] = str(exc)
+        return models[model_name], model_devices[model_name]
 
 
 def download_audio(url: str, directory: Path) -> tuple[Path, dict]:
@@ -241,8 +247,8 @@ def run_job(job_id: str, request: JobRequest) -> None:
         set_job(job_id, stage="model", progress=28)
 
         model_name = request.model or os.environ.get("WHISPER_MODEL", "large-v3")
-        model = get_model(model_name, job_id)
-        set_job(job_id, stage="transcribe", progress=36)
+        model, active_device = get_model(model_name, job_id)
+        set_job(job_id, stage="transcribe", progress=36, device=active_device)
         segment_stream, detected = model.transcribe(
             str(audio_path),
             language="zh",
@@ -294,6 +300,7 @@ def run_job(job_id: str, request: JobRequest) -> None:
             language=getattr(detected, "language", "zh"),
             language_probability=round(float(getattr(detected, "language_probability", 0)), 4),
             model=model_name,
+            device=active_device,
         )
     except Exception as exc:
         set_job(job_id, status="failed", stage="failed", error=str(exc), progress=0)
@@ -312,10 +319,16 @@ def root():
 
 @app.get("/api/health")
 def health():
+    model_name = os.environ.get("WHISPER_MODEL", "large-v3")
+    configured_device = os.environ.get("WHISPER_DEVICE", "cpu").strip().lower()
+    active_device = model_devices.get(model_name)
     return {
         "status": "ready",
-        "model": os.environ.get("WHISPER_MODEL", "large-v3"),
-        "device": os.environ.get("WHISPER_DEVICE", "cpu"),
+        "model": model_name,
+        "device": active_device or configured_device,
+        "configured_device": configured_device,
+        "model_loaded": active_device is not None,
+        "fallback_reason": model_fallback_reasons.get(model_name, ""),
     }
 
 

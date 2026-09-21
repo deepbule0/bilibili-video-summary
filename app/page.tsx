@@ -118,6 +118,7 @@ export default function Home() {
   const [summary, setSummary] = useState<VideoSummary | null>(null);
   const [error, setError] = useState("");
   const [engineHint, setEngineHint] = useState(false);
+  const [transcriptionDevice, setTranscriptionDevice] = useState("");
   const autoStarted = useRef(false);
   const busy = ["reading", "transcribing", "summarizing"].includes(phase);
   const shownProgress = progress || phaseCopy[phase].progress;
@@ -131,6 +132,7 @@ export default function Home() {
     setSummary(null);
     setError("");
     setEngineHint(false);
+    setTranscriptionDevice("");
     setProgress(10);
     setPhase("reading");
 
@@ -182,6 +184,7 @@ export default function Home() {
             if (!statusResponse.ok) throw new Error("无法读取本地转写进度");
             const status = await statusResponse.json();
             setProgress(Math.max(35, Math.min(82, Number(status.progress ?? 0))));
+            if (status.device) setTranscriptionDevice(String(status.device));
             if (status.status === "failed") throw new Error(status.error || "本地转写失败");
             if (status.status === "complete") {
               activeTranscript = status.transcript ?? [];
@@ -436,7 +439,7 @@ export default function Home() {
             <div className="mb-7 flex flex-col gap-5 rounded-[1.5rem] border border-border bg-card/70 p-5 backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between sm:p-6">
               <div className="flex min-w-0 items-center gap-4">
                 <div className="grid size-12 shrink-0 place-items-center rounded-2xl bg-primary/12 text-primary"><CheckCircle2 className="size-6" /></div>
-                <div className="min-w-0"><p className="text-xs font-medium text-primary">总结完成 · {summary.mode === "gpt" ? "GPT 增强" : "零费用模式"}</p><h1 className="mt-1 truncate text-lg font-semibold sm:text-xl">{video.title}</h1><p className="mt-1 text-xs text-muted-foreground">{video.owner} · {formatTimestamp(video.duration)} · {transcript.length} 段转写</p></div>
+                <div className="min-w-0"><p className="text-xs font-medium text-primary">总结完成 · {summary.mode === "gpt" ? "GPT 增强" : "零费用模式"}{transcriptionDevice ? ` · ${transcriptionDevice === "cuda" ? "GPU 转写" : "CPU 转写"}` : ""}</p><h1 className="mt-1 truncate text-lg font-semibold sm:text-xl">{video.title}</h1><p className="mt-1 text-xs text-muted-foreground">{video.owner} · {formatTimestamp(video.duration)} · {transcript.length} 段转写</p></div>
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button variant="outline" size="sm" onClick={() => { setSummary(null); setPhase("idle"); }}><RotateCcw className="size-3.5" />新建</Button>
