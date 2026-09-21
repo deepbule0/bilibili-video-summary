@@ -25,6 +25,15 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
+
+@app.middleware("http")
+async def allow_local_network_access(request, call_next):
+    """Allow an HTTPS page to call this loopback-only service in Chromium."""
+    response = await call_next(request)
+    if request.headers.get("access-control-request-private-network") == "true":
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
+
 jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
 models: dict[str, object] = {}
@@ -62,17 +71,19 @@ def get_model(model_name: str):
 
     with model_lock:
         if model_name not in models:
-            device = "cpu"
-            compute_type = "int8"
+            # GPU enumeration can succeed even when the CUDA runtime DLLs are
+            # missing. CPU/int8 works on every supported Windows installation;
+            # users with a complete CUDA setup can opt in explicitly.
+            device = os.environ.get("WHISPER_DEVICE", "cpu").strip().lower()
+            if device not in {"cpu", "cuda"}:
+                device = "cpu"
+            compute_type = "float16" if device == "cuda" else "int8"
             try:
-                import ctranslate2
-
-                if ctranslate2.get_cuda_device_count() > 0:
-                    device = "cuda"
-                    compute_type = "float16"
+                models[model_name] = WhisperModel(model_name, device=device, compute_type=compute_type)
             except Exception:
-                pass
-            models[model_name] = WhisperModel(model_name, device=device, compute_type=compute_type)
+                if device != "cuda":
+                    raise
+                models[model_name] = WhisperModel(model_name, device="cpu", compute_type="int8")
         return models[model_name]
 
 
@@ -117,7 +128,7 @@ def run_job(job_id: str, request: JobRequest) -> None:
         duration = float(info.get("duration") or 0)
         set_job(job_id, stage="model", progress=28)
 
-        model_name = request.model or os.environ.get("WHISPER_MODEL", "small")
+        model_name = request.model or os.environ.get("WHISPER_MODEL", "base")
         model = get_model(model_name)
         set_job(job_id, stage="transcribe", progress=36)
         segment_stream, detected = model.transcribe(
@@ -172,7 +183,11 @@ def root():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ready", "model": os.environ.get("WHISPER_MODEL", "small")}
+    return {
+        "status": "ready",
+        "model": os.environ.get("WHISPER_MODEL", "base"),
+        "device": os.environ.get("WHISPER_DEVICE", "cpu"),
+    }
 
 
 @app.post("/api/jobs", status_code=202)

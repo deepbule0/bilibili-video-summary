@@ -4,12 +4,12 @@
 
 ## 最快使用方式（Windows）
 
-1. 安装 Python 3.10+ 与 Node.js 22+。
+1. 安装 Python 3.10 或更高版本。
 2. 双击 `start-local.bat`。
-3. 首次启动会自动安装依赖；浏览器随后打开 `http://localhost:5173/`。
+3. 首次启动会自动安装依赖与 Whisper 模型；准备完成后会自动打开在线页面。
 4. 粘贴 B 站链接并点击「一键总结」。
 
-默认使用 `faster-whisper small` 在本机转写，使用规则模型在本地提炼摘要，不产生模型 API 费用。首次转写会下载 Whisper 模型，之后可离线复用。
+默认使用 `faster-whisper base` 在本机 CPU 转写，使用规则模型在本地提炼摘要，不产生模型 API 费用。首次转写会下载 Whisper 模型，之后可离线复用。已正确安装 CUDA 运行库的电脑可设置 `WHISPER_DEVICE=cuda` 使用显卡。
 
 ## GPT 增强模式
 
