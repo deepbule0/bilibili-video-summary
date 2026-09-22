@@ -11,15 +11,15 @@ const schema = {
     overview: { type: "string" },
     keyPoints: {
       type: "array",
-      minItems: 4,
-      maxItems: 8,
+      minItems: 1,
+      maxItems: 12,
       items: {
         type: "object",
         additionalProperties: false,
         required: ["title", "detail", "time"],
         properties: {
           title: { type: "string", minLength: 4 },
-          detail: { type: "string", minLength: 80 },
+          detail: { type: "string", minLength: 20 },
           time: { type: "number" },
         },
       },
@@ -33,11 +33,11 @@ const schema = {
         properties: {
           time: { type: "number" },
           title: { type: "string" },
-          summary: { type: "string", minLength: 100 },
+          summary: { type: "string", minLength: 40 },
         },
       },
-      minItems: 3,
-      maxItems: 10,
+      minItems: 1,
+      maxItems: 12,
     },
     quotes: {
       type: "array",
@@ -53,10 +53,14 @@ const schema = {
   },
 };
 
-function getOutputText(data: any) {
-  if (typeof data?.output_text === "string") return data.output_text;
-  for (const item of data?.output ?? []) {
-    for (const content of item?.content ?? []) {
+function getOutputText(data: unknown) {
+  const response = data as {
+    output_text?: unknown;
+    output?: Array<{ content?: Array<{ type?: unknown; text?: unknown }> }>;
+  };
+  if (typeof response?.output_text === "string") return response.output_text;
+  for (const item of response?.output ?? []) {
+    for (const content of item.content ?? []) {
       if (content?.type === "output_text" && typeof content.text === "string") return content.text;
     }
   }
@@ -99,7 +103,7 @@ export async function POST(request: NextRequest) {
       body: JSON.stringify({
         model,
         store: false,
-        instructions: "你是一名严谨的中文内容编辑。只根据给定转写总结，不补充外部事实；保留不确定性，并用时间秒数关联原视频。overview 要写成 2 至 4 个连贯段落。每个 keyPoint 必须包含简明标题，以及 2 至 4 句具体说明，优先保留人物、数字、判断依据和例子。chapters 要覆盖完整视频，每段写成不少于 100 字的内容段落，不能只列标题。",
+        instructions: "你是一名严谨的中文内容编辑。先判断视频的真实主题、内容类型和信息密度，不预设领域。只依据给定转写，不补充外部事实。过滤依据是信息价值，不是视频形式：只有明确不推进主题的直播点名、欢迎观众、感谢礼物、设备和声音调试、读弹幕、寒暄、广告套话、重复口头禅和无关闲聊才删除。口语化表达、铺垫、举例、重复解释或情绪表达只要承载分析依据、推理、案例、事实或结论，就必须保留其有效信息。对于持续输出信息的课程、访谈、演讲和长视频，要覆盖开头、中段、结尾的全部主要论点，不能只抽少数亮点。数字或专有名词不清楚时写明‘转写不清，需回看原片’，不要猜测。不得使用常识补写原文没有的例子、术语、字段、做法或结论；检查所有数量、分类、比例、因果链是否自洽。开场预告中只被列出而正文没有展开的主题，不能写成视频已经分析过；主播昵称和陌生专名不得联想成国家、机构或外部人物；语法破碎、孤立数字或疑似同音错字不得自行补全。overview 按内容自然写成一段或数段完整总结，讲清主题、重要信息、逻辑关系、结论和限制，不写时间轴流水账。keyPoints 和 chapters 的数量随内容密度调整；每项必须有具体说明，不能只有标题或时间。chapters 按主题、论证步骤或内容结构组织，不按固定时长机械切片。所有 time 必须取自最相关原文的时间标记，不能无理由统一填 0。quotes 必须是转写中的连续原话，不得改写、拼接或使用省略号。输出前核对正文中的主要论点、关键依据和最终结论是否都已覆盖。",
         input: `视频标题：${title}\n视频简介：${description}\n\n转写：\n${transcriptText}`,
         text: { format: { type: "json_schema", name: "video_summary", strict: true, schema } },
       }),
