@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   ArrowRight,
-  AudioLines,
   Check,
   CheckCircle2,
   Clock3,
@@ -29,6 +28,7 @@ import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toaster } from "@/components/ui/sonner";
+import { SiteNav } from "@/components/site-nav";
 import { formatTimestamp, type TranscriptSegment, type VideoSummary } from "@/lib/video-summary";
 
 const exampleUrl = "https://www.bilibili.com/video/BV1Sve26eEGE/";
@@ -138,6 +138,64 @@ export default function Home() {
     setPhase("reading");
 
     try {
+      // Commercial path: the hosted API owns authentication, quota reservation,
+      // queue priority and settlement. If no public GPU worker is configured yet,
+      // the owner's existing loopback engine remains available as a launch fallback.
+      const serviceResponse = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: trimmed, mode }),
+      });
+      const serviceData = await readJsonResponse(serviceResponse);
+      if (serviceResponse.status === 401) {
+        throw new Error("请先点击右上角“登录 / 注册”，登录后即可领取30分钟免费试用");
+      }
+      if (serviceResponse.ok && serviceData.ok && serviceData.id) {
+        setPhase("transcribing");
+        setProgress(32);
+        for (let attempt = 0; attempt < 1800; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 1800));
+          const statusResponse = await fetch(`/api/jobs/${serviceData.id}`);
+          const status = await readJsonResponse(statusResponse);
+          if (!statusResponse.ok || !status.ok) throw new Error(status.error || "无法读取云端处理进度");
+          if (status.stage === "summarize") setPhase("summarizing");
+          setProgress(Math.max(32, Math.min(status.stage === "summarize" ? 98 : 84, Number(status.progress ?? 0))));
+          if (status.device) setTranscriptionDevice(String(status.device));
+          if (status.status === "failed") throw new Error(status.error || "GPU 处理失败，预留额度已经退回");
+          if (status.status === "complete") {
+            const serviceTranscript = (status.transcript ?? []) as TranscriptSegment[];
+            const serviceVideo = status.video as VideoInfo | undefined;
+            if (serviceVideo) setVideo(serviceVideo);
+            setTranscript(serviceTranscript);
+            if (status.summary) {
+              setSummaryModel(String(status.summary_model ?? "qwen3.5:9b"));
+              setSummaryDevice(String(status.summary_device ?? "GPU"));
+              setSummary(status.summary as VideoSummary);
+              setProgress(100);
+              setPhase("done");
+              return status.summary as VideoSummary;
+            }
+            if (!serviceVideo || !serviceTranscript.length) throw new Error("GPU 任务已完成，但没有返回可用的转写内容");
+            setPhase("summarizing");
+            const enhancedResponse = await fetch("/api/summarize", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ title: serviceVideo.title, description: serviceVideo.description, transcript: serviceTranscript, mode, jobId: serviceData.id }),
+            });
+            const enhanced = await readJsonResponse(enhancedResponse);
+            if (!enhancedResponse.ok || !enhanced.ok || !enhanced.summary) throw new Error(enhanced.error || "总结生成失败");
+            setSummary(enhanced.summary as VideoSummary);
+            setProgress(100);
+            setPhase("done");
+            return enhanced.summary as VideoSummary;
+          }
+        }
+        throw new Error("处理时间超过预期，请稍后在账户中心查看任务状态");
+      }
+      if (serviceData.code && serviceData.code !== "GPU_ENGINE_NOT_CONFIGURED") {
+        throw new Error(serviceData.error || "云端任务创建失败");
+      }
+
       const infoResponse = await fetch(`/api/video?url=${encodeURIComponent(trimmed)}`, {
         credentials: "same-origin",
         headers: { Accept: "application/json" },
@@ -342,21 +400,7 @@ export default function Home() {
   return (
     <main className="min-h-screen overflow-hidden bg-background text-foreground">
       <div className="mesh" aria-hidden="true" />
-      <header className="relative z-10 mx-auto flex w-full max-w-6xl items-center justify-between px-5 py-5 sm:px-8">
-        <button className="flex items-center gap-3 text-left" onClick={() => { setPhase("idle"); setSummary(null); setVideo(null); }}>
-          <span className="grid size-9 place-items-center rounded-xl bg-primary text-primary-foreground shadow-[0_0_30px_rgba(54,211,153,.22)]">
-            <AudioLines className="size-5" strokeWidth={2.2} />
-          </span>
-          <span>
-            <span className="block text-[15px] font-semibold leading-none tracking-tight">听见 · 总结</span>
-            <span className="mt-1 block text-xs text-muted-foreground">B 站视频内容提炼</span>
-          </span>
-        </button>
-        <span className="inline-flex items-center gap-2 rounded-full border border-border bg-card/60 px-3 py-1.5 text-xs text-muted-foreground backdrop-blur">
-          <span className="size-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,.7)]" />
-          本地转写 · 内容不上传
-        </span>
-      </header>
+      <SiteNav />
 
       <section className={`relative z-10 mx-auto w-full max-w-6xl px-5 sm:px-8 ${summary ? "pb-20 pt-8" : "pb-16 pt-[7vh] lg:pt-[11vh]"}`}>
         {!summary ? (

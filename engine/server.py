@@ -12,12 +12,15 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
+from itertools import count
 from pathlib import Path
+from queue import PriorityQueue
 from typing import Callable, Literal
 from urllib.parse import urlparse
 
 import requests
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -28,13 +31,17 @@ app.add_middleware(
     allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "X-Engine-Token"],
 )
 
 
 @app.middleware("http")
 async def allow_local_network_access(request, call_next):
     """Allow an HTTPS page to call this loopback-only service in Chromium."""
+    configured_token = os.environ.get("ENGINE_API_TOKEN", "").strip()
+    if configured_token and request.method != "OPTIONS" and request.url.path.startswith("/api/"):
+        if request.headers.get("x-engine-token", "") != configured_token:
+            return JSONResponse({"detail": "未授权的工作节点请求"}, status_code=401)
     response = await call_next(request)
     if request.headers.get("access-control-request-private-network") == "true":
         response.headers["Access-Control-Allow-Private-Network"] = "true"
@@ -47,6 +54,10 @@ model_devices: dict[str, str] = {}
 model_fallback_reasons: dict[str, str] = {}
 model_lock = threading.Lock()
 pipeline_lock = threading.Lock()
+job_queue: PriorityQueue = PriorityQueue()
+job_sequence = count()
+worker_start_lock = threading.Lock()
+worker_started = False
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 SUMMARY_MODEL = os.environ.get("SUMMARY_MODEL", "qwen3.5:9b")
@@ -94,6 +105,8 @@ class JobRequest(BaseModel):
     url: str = Field(min_length=3, max_length=1200)
     summary_mode: Literal["local", "gpt"] = "local"
     model: Literal["base", "small", "medium", "large-v3"] | None = None
+    priority: int = Field(default=10, ge=0, le=100)
+    external_job_id: str | None = Field(default=None, max_length=120)
 
 
 class SummaryRequest(BaseModel):
@@ -781,6 +794,27 @@ def process_job(job_id: str, request: JobRequest) -> None:
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+def queue_worker() -> None:
+    while True:
+        _negative_priority, _sequence, job_id, request = job_queue.get()
+        try:
+            set_job(job_id, status="processing", stage="starting", progress=4)
+            run_job(job_id, request)
+        finally:
+            job_queue.task_done()
+
+
+def ensure_queue_worker() -> None:
+    global worker_started
+    if worker_started:
+        return
+    with worker_start_lock:
+        if worker_started:
+            return
+        threading.Thread(target=queue_worker, name="gpu-priority-worker", daemon=True).start()
+        worker_started = True
+
+
 @app.get("/")
 def root():
     return {
@@ -804,6 +838,8 @@ def health():
         "fallback_reason": model_fallback_reasons.get(model_name, ""),
         "summary_engine": "ollama",
         "summary_model": SUMMARY_MODEL,
+        "queued_jobs": job_queue.qsize(),
+        "priority_queue": True,
     }
 
 
@@ -830,7 +866,7 @@ def summarize_transcript(request: SummaryRequest):
 
 
 @app.post("/api/jobs", status_code=202)
-def create_job(request: JobRequest, background_tasks: BackgroundTasks):
+def create_job(request: JobRequest):
     try:
         validate_url(request.url)
     except ValueError as exc:
@@ -842,11 +878,14 @@ def create_job(request: JobRequest, background_tasks: BackgroundTasks):
             "status": "queued",
             "stage": "queued",
             "progress": 2,
+            "priority": request.priority,
+            "external_job_id": request.external_job_id,
             "created_at": int(time.time()),
             "updated_at": int(time.time()),
         }
-    background_tasks.add_task(run_job, job_id, request)
-    return {"id": job_id, "status": "queued"}
+    ensure_queue_worker()
+    job_queue.put((-request.priority, next(job_sequence), job_id, request))
+    return {"id": job_id, "status": "queued", "priority": request.priority, "queue_size": job_queue.qsize()}
 
 
 @app.get("/api/jobs/{job_id}")

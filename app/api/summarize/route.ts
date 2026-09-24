@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { summarizeLocally, type TranscriptSegment, type VideoSummary } from "@/lib/video-summary";
+import { getUserJob, isOwner } from "@/lib/commerce";
+import { apiError, requireApiUser } from "@/lib/request-user";
 
 const schema = {
   type: "object",
@@ -74,7 +76,9 @@ export async function POST(request: NextRequest) {
       description?: string;
       transcript?: TranscriptSegment[];
       mode?: "local" | "gpt";
+      jobId?: string;
     };
+    const user = await requireApiUser();
     const title = String(body.title ?? "未命名视频").slice(0, 300);
     const description = String(body.description ?? "").slice(0, 4000);
     const transcript = Array.isArray(body.transcript) ? body.transcript.slice(0, 12000) : [];
@@ -82,6 +86,13 @@ export async function POST(request: NextRequest) {
 
     if (body.mode !== "gpt") {
       return NextResponse.json({ ok: true, summary: summarizeLocally(title, transcript, description) });
+    }
+
+    if (!(await isOwner(user.userId))) {
+      const job = body.jobId ? await getUserJob(user.userId, body.jobId) : null;
+      if (!job || job.status !== "complete") {
+        return NextResponse.json({ ok: false, error: "GPT增强总结必须关联已完成并计费的任务" }, { status: 403 });
+      }
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
@@ -118,8 +129,9 @@ export async function POST(request: NextRequest) {
     const summary = JSON.parse(text) as Omit<VideoSummary, "mode">;
     return NextResponse.json({ ok: true, summary: { ...summary, mode: "gpt" } });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "总结生成失败";
+    const failure = apiError(error);
+    const message = failure.message;
     console.warn("[summarize]", message);
-    return NextResponse.json({ ok: false, error: message });
+    return NextResponse.json({ ok: false, error: message }, { status: failure.status });
   }
 }

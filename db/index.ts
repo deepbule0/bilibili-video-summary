@@ -11,3 +11,8 @@ export function getDb() {
 
   return drizzle(env.DB, { schema });
 }
+
+export function getD1() {
+  if (!env.DB) throw new Error("数据库暂时不可用，请稍后重试。");
+  return env.DB;
+}
