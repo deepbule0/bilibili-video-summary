@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   ArrowRight,
+  AudioLines,
   Check,
   CheckCircle2,
   Clock3,
@@ -29,6 +30,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toaster } from "@/components/ui/sonner";
 import { SiteNav } from "@/components/site-nav";
+import { readJsonResponse as readApiJson } from "@/lib/http-client";
 import { formatTimestamp, type TranscriptSegment, type VideoSummary } from "@/lib/video-summary";
 
 const exampleUrl = "https://www.bilibili.com/video/BV1Sve26eEGE/";
@@ -49,17 +51,26 @@ type VideoInfo = {
 
 type Phase = "idle" | "reading" | "transcribing" | "summarizing" | "done" | "needs-engine" | "error";
 
+type SummaryApiResponse = {
+  ok?: boolean; error?: string; code?: string; id?: string; bvid?: string;
+  video?: VideoInfo; transcript?: TranscriptSegment[]; summary?: VideoSummary;
+  stage?: string; progress?: number; device?: string; status?: string;
+  summary_model?: string; summary_device?: string; summary_error?: string;
+};
+type BrowserModelContext = {
+  registerTool: (tool: {
+    name: string; title: string; description: string; inputSchema: object;
+    annotations: object;
+    execute: (input: { url: string; mode?: "local" | "gpt" }) => Promise<object>;
+  }, options: { signal: AbortSignal }) => unknown;
+};
+
 function extractBvid(value: string) {
   return value.match(/BV[1-9A-HJ-NP-Za-km-z]{10}/)?.[0] ?? "";
 }
 
-async function readJsonResponse(response: Response) {
-  const text = await response.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(`线上接口返回了非 JSON 内容（HTTP ${response.status}），已停止解析以避免显示无意义错误。`);
-  }
+function readJsonResponse(response: Response) {
+  return readApiJson<SummaryApiResponse>(response);
 }
 
 const phaseCopy: Record<Phase, { label: string; detail: string; progress: number }> = {
@@ -200,7 +211,7 @@ export default function Home() {
         credentials: "same-origin",
         headers: { Accept: "application/json" },
       });
-      let info: any;
+      let info: SummaryApiResponse;
       try {
         info = await readJsonResponse(infoResponse);
       } catch {
@@ -237,12 +248,13 @@ export default function Home() {
           });
           if (!jobResponse.ok) throw new Error("本地引擎未就绪");
           engineConnected = true;
-          const job = await jobResponse.json();
+          const job = await readJsonResponse(jobResponse);
+          if (!job.id) throw new Error("本地引擎没有返回任务编号");
           for (let attempt = 0; attempt < 1800; attempt += 1) {
             await new Promise((resolve) => setTimeout(resolve, 1800));
             const statusResponse = await fetch(`${localEngine}/api/jobs/${job.id}`);
             if (!statusResponse.ok) throw new Error("无法读取本地转写进度");
-            const status = await statusResponse.json();
+            const status = await readJsonResponse(statusResponse);
             if (status.stage === "summarize") setPhase("summarizing");
             setProgress(Math.max(35, Math.min(status.stage === "summarize" ? 98 : 82, Number(status.progress ?? 0))));
             if (status.device) setTranscriptionDevice(String(status.device));
@@ -285,7 +297,7 @@ export default function Home() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title: activeVideo.title, description: activeVideo.description, transcript: activeTranscript }),
           });
-          const localSummaryData = await localSummaryResponse.json();
+          const localSummaryData = await readJsonResponse(localSummaryResponse);
           if (localSummaryResponse.ok && localSummaryData.ok && localSummaryData.summary) {
             setSummaryModel(String(localSummaryData.summary_model ?? "qwen3.5:9b"));
             setSummaryDevice(String(localSummaryData.summary_device ?? ""));
@@ -331,13 +343,17 @@ export default function Home() {
     const sharedUrl = params.get("url");
     if (sharedUrl) {
       autoStarted.current = true;
-      setUrl(sharedUrl);
-      void analyze(sharedUrl, params.get("mode") === "gpt" ? "gpt" : "local").catch(() => undefined);
+      let launched = false;
+      const timer = window.setTimeout(() => {
+        launched = true;
+        void analyze(sharedUrl, params.get("mode") === "gpt" ? "gpt" : "local").catch(() => undefined);
+      }, 0);
+      return () => { window.clearTimeout(timer); if (!launched) autoStarted.current = false; };
     }
   }, [analyze]);
 
   useEffect(() => {
-    const context = (document as Document & { modelContext?: any }).modelContext;
+    const context = (document as Document & { modelContext?: BrowserModelContext }).modelContext;
     if (!context?.registerTool) return;
     const lifecycle = new AbortController();
     try {

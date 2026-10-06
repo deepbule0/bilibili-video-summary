@@ -2,6 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 
 const BVID_PATTERN = /BV[1-9A-HJ-NP-Za-km-z]{10}/;
 
+type BiliPage = { cid: number; duration: number; part: string; page?: number };
+type BiliVideo = {
+  cid: number; title: string; duration: number; desc?: string; pic?: string;
+  pages?: BiliPage[]; owner?: { name?: string };
+};
+type BiliSubtitle = { lan: string; lan_doc?: string; subtitle_url?: string };
+
 function bilibiliHeaders() {
   return {
     "User-Agent": "Mozilla/5.0 (compatible; BiliSummary/1.0)",
@@ -15,7 +22,7 @@ async function fetchVideoData(bvid: string) {
   });
   const apiText = await apiResponse.text();
   try {
-    const apiJson = JSON.parse(apiText) as { code: number; message: string; data: any };
+    const apiJson = JSON.parse(apiText) as { code: number; message: string; data?: BiliVideo };
     if (apiJson.code === 0 && apiJson.data) return apiJson.data;
   } catch {
     // The Bilibili API sometimes serves a browser challenge to cloud IPs.
@@ -29,11 +36,11 @@ async function fetchVideoData(bvid: string) {
     },
   });
   const pageHtml = await pageResponse.text();
-  const initialState = pageHtml.match(/__INITIAL_STATE__=(\{.*?\});\(function\(\)/s)?.[1];
+  const initialState = pageHtml.match(/__INITIAL_STATE__=(\{[\s\S]*?\});\(function\(\)/)?.[1];
   if (!initialState) {
     throw new Error(`B站暂时拒绝了云端读取（API ${apiResponse.status}，页面 ${pageResponse.status}）`);
   }
-  const pageData = JSON.parse(initialState) as { videoData?: any; error?: { trueCode?: number } };
+  const pageData = JSON.parse(initialState) as { videoData?: BiliVideo; error?: { trueCode?: number } };
   if (!pageData.videoData) throw new Error("B站页面中没有可用的视频信息");
   return pageData.videoData;
 }
@@ -79,18 +86,18 @@ export async function GET(request: NextRequest) {
         `https://api.bilibili.com/x/player/v2?bvid=${bvid}&cid=${page.cid}`,
         { headers: bilibiliHeaders() },
       );
-      const playerJson = await playerResponse.json() as any;
+      const playerJson = await playerResponse.json() as { data?: { subtitle?: { subtitles?: BiliSubtitle[] } } };
       const subtitles = playerJson?.data?.subtitle?.subtitles ?? [];
-      const preferred = subtitles.find((item: any) => /zh|ai-zh/i.test(item.lan)) ?? subtitles[0];
+      const preferred = subtitles.find((item) => /zh|ai-zh/i.test(item.lan)) ?? subtitles[0];
       if (preferred?.subtitle_url) {
         const subtitleUrl = String(preferred.subtitle_url).replace(/^http:/, "https:").replace(/^\/\//, "https://");
         const subtitleResponse = await fetch(subtitleUrl, { headers: bilibiliHeaders() });
-        const subtitleJson = await subtitleResponse.json() as any;
-        transcript = (subtitleJson.body ?? []).map((item: any) => ({
+        const subtitleJson = await subtitleResponse.json() as { body?: { from: number; to: number; content: string }[] };
+        transcript = (subtitleJson.body ?? []).map((item) => ({
           start: Number(item.from) || 0,
           end: Number(item.to) || 0,
           text: String(item.content ?? "").trim(),
-        })).filter((item: any) => item.text);
+        })).filter((item) => item.text);
         subtitleLanguage = preferred.lan_doc || preferred.lan || "中文字幕";
       }
     } catch {

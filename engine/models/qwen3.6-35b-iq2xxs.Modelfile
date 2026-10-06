@@ -1,0 +1,4 @@
+FROM ../../work/models/Qwen_Qwen3.6-35B-A3B-IQ2_XXS.gguf
+PARAMETER num_ctx 16384
+PARAMETER temperature 0
+PARAMETER repeat_penalty 1.05

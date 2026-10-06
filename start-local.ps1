@@ -9,9 +9,13 @@ $engineErr = Join-Path $projectRoot ".local-engine.err.log"
 $ollamaOut = Join-Path $projectRoot ".local-ollama.out.log"
 $ollamaErr = Join-Path $projectRoot ".local-ollama.err.log"
 $healthUrl = "http://127.0.0.1:8765/api/health"
-$siteUrl = "https://bili-video-summary.purple-ox-8139.chatgpt.site/"
-$summaryModel = if ($env:BILI_SUMMARY_MODEL) { $env:BILI_SUMMARY_MODEL } else { "qwen3.5:9b" }
-$summaryModelSize = if ($summaryModel -eq "qwen3.5:27b") { "17 GB" } else { "6.6 GB" }
+$siteUrl = if ($env:BILI_APP_URL) { $env:BILI_APP_URL } else { "https://bili-video-summary.purple-ox-8139.chatgpt.site/" }
+$summaryProfilePath = Join-Path $projectRoot "work\gpu-summary-profile.json"
+$summaryProfile = if (Test-Path -LiteralPath $summaryProfilePath) { Get-Content -LiteralPath $summaryProfilePath -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null }
+$summaryModel = if ($env:BILI_SUMMARY_MODEL) { $env:BILI_SUMMARY_MODEL } elseif ($summaryProfile.model) { $summaryProfile.model } else { "qwen3.5:9b-q8_0" }
+$summaryContext = if ($env:BILI_SUMMARY_NUM_CTX) { [int]$env:BILI_SUMMARY_NUM_CTX } elseif ($summaryProfile.num_ctx) { [int]$summaryProfile.num_ctx } else { 16384 }
+$summaryBatch = if ($env:BILI_SUMMARY_NUM_BATCH) { [int]$env:BILI_SUMMARY_NUM_BATCH } elseif ($summaryProfile.num_batch) { [int]$summaryProfile.num_batch } else { 128 }
+$summaryModelSize = switch ($summaryModel) { "qwen3.5:27b" { "17 GB" } "qwen3.5:9b-q8_0" { "11 GB" } "bili-summary:35b-iq2xxs" { "10.7 GB" } default { "depends on the selected model" } }
 $appDataRoot = Join-Path $env:LOCALAPPDATA "BiliVideoSummary"
 $cudaRuntimeRoot = Join-Path $appDataRoot "cuda-runtime-v3"
 
@@ -55,8 +59,8 @@ function Test-OllamaServer {
 function Test-OllamaModel([string]$ollamaCommand) {
   if (-not $ollamaCommand -or -not (Test-OllamaServer)) { return $false }
   try {
-    $models = & $ollamaCommand list 2>$null
-    return [bool]($models -match [regex]::Escape($summaryModel))
+    $models = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 5
+    return [bool]($models.models | Where-Object { $_.name -eq $summaryModel })
   } catch {
     return $false
   }
@@ -89,8 +93,12 @@ function Install-OllamaSummaryModel {
 
   if (-not (Test-OllamaModel $ollamaCommand)) {
     Write-Host "Downloading $summaryModel (about $summaryModelSize, first summary start only)..." -ForegroundColor Cyan
-    & $ollamaCommand pull $summaryModel
-    if ($LASTEXITCODE -ne 0) { throw "Qwen3.5 model download failed." }
+    if ($summaryModel -eq "bili-summary:35b-iq2xxs") {
+      & $pythonExe (Join-Path $projectRoot "scripts\tune-gpu-summary.py") install-35b
+    } else {
+      & $ollamaCommand pull $summaryModel
+    }
+    if ($LASTEXITCODE -ne 0) { throw "Summary model download failed." }
   }
   if (-not (Test-OllamaModel $ollamaCommand)) { throw "Qwen3.5 model validation failed." }
   return $ollamaCommand
@@ -145,7 +153,7 @@ if ($nvidiaSmi) {
 $runtimeDirectories = @(Get-CudaRuntimeDirectories)
 $existingOllama = Get-OllamaCommand
 $existingSummaryReady = Test-OllamaModel $existingOllama
-if ($existingHealth -and $existingSummaryReady -and $existingHealth.summary_model -eq $summaryModel -and (($existingHealth.device -eq "cuda" -and $runtimeDirectories.Count -gt 0) -or -not $hasNvidiaGpu)) {
+if ($existingHealth -and $existingSummaryReady -and $existingHealth.summary_model -eq $summaryModel -and $existingHealth.summary_num_ctx -eq $summaryContext -and $existingHealth.summary_num_batch -eq $summaryBatch -and (($existingHealth.device -eq "cuda" -and $runtimeDirectories.Count -gt 0) -or -not $hasNvidiaGpu)) {
   Write-Host "The engine is already running on $($existingHealth.device)." -ForegroundColor Green
   Start-Process $siteUrl
   Read-Host "The engine is running in the background. Press Enter to close this message"
@@ -235,13 +243,15 @@ if ($hasNvidiaGpu) {
   $env:WHISPER_DEVICE = "cpu"
 }
 
-Write-Host "[5/6] Preparing the Qwen3.5 local summary model..." -ForegroundColor Cyan
+Write-Host "[5/6] Preparing the free local summary model..." -ForegroundColor Cyan
 try {
   $ollamaCommand = Install-OllamaSummaryModel
   $env:SUMMARY_MODEL = $summaryModel
+  $env:SUMMARY_NUM_CTX = [string]$summaryContext
+  $env:SUMMARY_NUM_BATCH = [string]$summaryBatch
   Write-Host "$summaryModel is ready for GPU-accelerated local summaries." -ForegroundColor Green
 } catch {
-  Write-Host "The Qwen3.5 summary model is unavailable; the built-in fallback will be used: $($_.Exception.Message)" -ForegroundColor Yellow
+  Write-Host "The local summary model is unavailable; the built-in fallback will be used: $($_.Exception.Message)" -ForegroundColor Yellow
 }
 
 if ($existingHealth) {

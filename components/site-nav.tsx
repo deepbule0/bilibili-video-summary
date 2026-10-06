@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { AudioLines, CircleUserRound, Crown, LayoutDashboard, LogIn } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { readJsonResponse } from "@/lib/http-client";
 
 type Account = { user?: { role?: string }; entitlement?: { plan?: { name?: string }; remainingSeconds?: number | null } };
 
@@ -12,8 +14,9 @@ export function SiteNav({ compact = false }: { compact?: boolean }) {
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     fetch("/api/account", { credentials: "same-origin" })
-      .then(async (response) => response.ok ? (await response.json()).account : null)
+      .then(async (response) => response.ok ? (await readJsonResponse<{ account: Account }>(response)).account : null)
       .then(setAccount)
+      .catch(() => setAccount(null))
       .finally(() => setLoaded(true));
   }, []);
   const plan = account?.entitlement?.plan?.name;
@@ -21,13 +24,13 @@ export function SiteNav({ compact = false }: { compact?: boolean }) {
 
   return (
     <header className="relative z-20 mx-auto flex w-full max-w-6xl items-center justify-between gap-4 px-5 py-5 sm:px-8">
-      <a className="flex min-w-0 items-center gap-3" href="/">
+      <Link className="flex min-w-0 items-center gap-3" href="/">
         <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary text-primary-foreground shadow-[0_0_30px_rgba(54,211,153,.22)]"><AudioLines className="size-5" /></span>
         <span className={compact ? "hidden sm:block" : "block"}>
           <span className="block text-[15px] font-semibold leading-none tracking-tight">听见 · 总结</span>
           <span className="mt-1 block text-xs text-muted-foreground">B站视频内容提炼</span>
         </span>
-      </a>
+      </Link>
       <nav className="flex items-center gap-1.5" aria-label="主导航">
         <Button variant="ghost" size="sm" asChild><a href="/pricing">套餐</a></Button>
         {account ? (

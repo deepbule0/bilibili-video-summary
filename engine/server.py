@@ -60,7 +60,12 @@ worker_start_lock = threading.Lock()
 worker_started = False
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
-SUMMARY_MODEL = os.environ.get("SUMMARY_MODEL", "qwen3.5:9b")
+SUMMARY_PROFILE_PATH = Path(__file__).resolve().parents[1] / "work" / "gpu-summary-profile.json"
+SUMMARY_PROFILE = json.loads(SUMMARY_PROFILE_PATH.read_text(encoding="utf-8")) if SUMMARY_PROFILE_PATH.exists() else {}
+SUMMARY_MODEL = os.environ.get("SUMMARY_MODEL", SUMMARY_PROFILE.get("model", "qwen3.5:9b-q8_0"))
+SUMMARY_NUM_CTX = int(os.environ.get("SUMMARY_NUM_CTX", SUMMARY_PROFILE.get("num_ctx", 16384)))
+SUMMARY_NUM_BATCH = int(os.environ.get("SUMMARY_NUM_BATCH", SUMMARY_PROFILE.get("num_batch", 128)))
+SUMMARY_CHUNK_CHARACTERS = min(16000, max(1000, SUMMARY_NUM_CTX - 5000)) if SUMMARY_NUM_CTX < 16384 else 16000
 OLLAMA_HTTP = requests.Session()
 OLLAMA_HTTP.trust_env = False
 
@@ -316,7 +321,7 @@ def ollama_uses_gpu() -> bool:
         response = OLLAMA_HTTP.get(f"{OLLAMA_URL}/api/ps", timeout=(3, 10))
         response.raise_for_status()
         for model in response.json().get("models", []):
-            if str(model.get("name", "")).startswith(SUMMARY_MODEL.split(":")[0]):
+            if str(model.get("name", "")) == SUMMARY_MODEL:
                 return int(model.get("size_vram") or 0) > 0
     except (requests.RequestException, ValueError, TypeError):
         return False
@@ -491,9 +496,11 @@ def ollama_summary_request(prompt: str, keep_alive: str = "10m") -> GeneratedSum
         "keep_alive": keep_alive,
         "options": {
             "temperature": 0,
-            "num_ctx": 16384,
+            "num_ctx": SUMMARY_NUM_CTX,
+            "num_batch": SUMMARY_NUM_BATCH,
             "num_predict": 4096,
             "repeat_penalty": 1.08,
+            "presence_penalty": 0,
         },
     }
     response = OLLAMA_HTTP.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=(30, 1200))
@@ -520,9 +527,11 @@ def ollama_audit_request(prompt: str) -> SummaryAudit:
         "keep_alive": "10m",
         "options": {
             "temperature": 0,
-            "num_ctx": 16384,
+            "num_ctx": SUMMARY_NUM_CTX,
+            "num_batch": SUMMARY_NUM_BATCH,
             "num_predict": 4096,
             "repeat_penalty": 1.05,
+            "presence_penalty": 0,
         },
     }
     response = OLLAMA_HTTP.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=(30, 1200))
@@ -540,7 +549,7 @@ def summarize_with_ollama(
     on_progress: Callable[[float], None] | None = None,
 ) -> tuple[dict, str]:
     summary_transcript = filter_transcript_for_summary(transcript)
-    chunks = transcript_chunks(summary_transcript)
+    chunks = transcript_chunks(summary_transcript, SUMMARY_CHUNK_CHARACTERS)
     if not chunks:
         raise RuntimeError("没有可用于总结的转写文本")
     partials: list[GeneratedSummary] = []
@@ -838,6 +847,8 @@ def health():
         "fallback_reason": model_fallback_reasons.get(model_name, ""),
         "summary_engine": "ollama",
         "summary_model": SUMMARY_MODEL,
+        "summary_num_ctx": SUMMARY_NUM_CTX,
+        "summary_num_batch": SUMMARY_NUM_BATCH,
         "queued_jobs": job_queue.qsize(),
         "priority_queue": True,
     }

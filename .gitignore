@@ -49,3 +49,24 @@ next-env.d.ts
 /.codex/
 /outputs/
 /work/
+
+# Model weights, audio/video, credentials and account databases stay local.
+*.gguf
+*.safetensors
+*.ckpt
+*.onnx
+*.pt
+*.pth
+*.sqlite
+*.sqlite3
+*.db
+*.key
+*.p12
+*.pfx
+*.mp3
+*.m4a
+*.wav
+*.mp4
+*.part
+*.tsbuildinfo
+/35B模型调用交接.md

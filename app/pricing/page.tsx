@@ -8,22 +8,23 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Toaster } from "@/components/ui/sonner";
+import { readJsonResponse } from "@/lib/http-client";
 
 type Plan = { id: "basic" | "premium"; name: string; priceCents: number; weeklyLimitSeconds: number | null; priority: number; unlimited: boolean };
 
 export default function PricingPage() {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [buying, setBuying] = useState<string | null>(null);
-  useEffect(() => { fetch("/api/plans").then((r) => r.json()).then((d) => d.ok && setPlans(d.plans)); }, []);
+  useEffect(() => { fetch("/api/plans").then((r) => readJsonResponse<{ ok?: boolean; plans?: Plan[] }>(r)).then((d) => { if (d.ok && d.plans) setPlans(d.plans); }).catch(() => toast.error("无法读取套餐，请稍后重试")); }, []);
 
   async function buy(planId: string) {
     setBuying(planId);
     try {
       const response = await fetch("/api/billing/create-order", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ planId }) });
-      const data = await response.json();
-      if (response.status === 401) { window.location.href = `/signin-with-chatgpt?return_to=${encodeURIComponent("/pricing")}`; return; }
+      const data = await readJsonResponse<{ paymentUrl?: string; error?: string }>(response);
+      if (response.status === 401) { window.location.assign(`/signin-with-chatgpt?return_to=${encodeURIComponent("/pricing")}`); return; }
       if (!response.ok || !data.paymentUrl) throw new Error(data.error || "暂时无法创建订单");
-      window.location.href = data.paymentUrl;
+      window.location.assign(data.paymentUrl);
     } catch (error) { toast.error(error instanceof Error ? error.message : "下单失败"); }
     finally { setBuying(null); }
   }
